@@ -147,47 +147,56 @@ public:
         task.resources() + task.executor().resources(),
         None(),
         Subprocess::FD(STDOUT_FILENO),
-        Subprocess::FD(STDERR_FILENO))
-      .onAny(defer(
+        Subprocess::FD(STDERR_FILENO));
+
+    // Delay running inspect until we have given the container
+    // sufficient time to start.
+    if(run.isSome()) {
+      run.get().after(DOCKER_INSPECT_DELAY, [=](const Future<Nothing>&) {
+        // Delay sending TASK_RUNNING status update until we receive
+        // inspect output.
+        inspect = docker->inspect(containerName, DOCKER_INSPECT_DELAY)
+          .then(defer(self(), [=](const Docker::Container& container) {
+            if (!killed) {
+              TaskStatus status;
+              status.mutable_task_id()->CopyFrom(taskId);
+              status.set_state(TASK_RUNNING);
+              status.set_data(container.output);
+              if (container.ipAddress.isSome()) {
+                // TODO(karya): Deprecated -- Remove after 0.25.0 has shipped.
+                Label* label = status.mutable_labels()->add_labels();
+                label->set_key("Docker.NetworkSettings.IPAddress");
+                label->set_value(container.ipAddress.get());
+  
+                NetworkInfo* networkInfo =
+                  status.mutable_container_status()->add_network_infos();
+   
+                // TODO(CD): Deprecated -- Remove after 0.27.0.
+                networkInfo->set_ip_address(container.ipAddress.get());
+  
+                NetworkInfo::IPAddress* ipAddress =
+                  networkInfo->add_ip_addresses();
+                ipAddress->set_ip_address(container.ipAddress.get());
+              }
+              driver->sendStatusUpdate(status);
+            }
+    
+            return Nothing();
+          }));
+    
+        inspect.onReady(
+            defer(self(), &Self::launchHealthCheck, containerName, task));
+    
+        return Nothing();
+      });
+  
+      run.get().onAny(defer(
         self(),
         &Self::reaped,
         driver,
         taskId,
         lambda::_1));
-
-    // Delay sending TASK_RUNNING status update until we receive
-    // inspect output.
-    inspect = docker->inspect(containerName, DOCKER_INSPECT_DELAY)
-      .then(defer(self(), [=](const Docker::Container& container) {
-        if (!killed) {
-          TaskStatus status;
-          status.mutable_task_id()->CopyFrom(taskId);
-          status.set_state(TASK_RUNNING);
-          status.set_data(container.output);
-          if (container.ipAddress.isSome()) {
-            // TODO(karya): Deprecated -- Remove after 0.25.0 has shipped.
-            Label* label = status.mutable_labels()->add_labels();
-            label->set_key("Docker.NetworkSettings.IPAddress");
-            label->set_value(container.ipAddress.get());
-
-            NetworkInfo* networkInfo =
-              status.mutable_container_status()->add_network_infos();
-
-            // TODO(CD): Deprecated -- Remove after 0.27.0.
-            networkInfo->set_ip_address(container.ipAddress.get());
-
-            NetworkInfo::IPAddress* ipAddress =
-              networkInfo->add_ip_addresses();
-            ipAddress->set_ip_address(container.ipAddress.get());
-          }
-          driver->sendStatusUpdate(status);
-        }
-
-        return Nothing();
-      }));
-
-    inspect.onReady(
-        defer(self(), &Self::launchHealthCheck, containerName, task));
+    }
   }
 
   void killTask(ExecutorDriver* driver, const TaskID& taskId)
