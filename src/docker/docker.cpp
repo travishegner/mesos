@@ -52,6 +52,7 @@ using std::map;
 using std::string;
 using std::vector;
 
+const Duration DOCKER_INSPECT_TIMEOUT = Seconds(5);
 
 Nothing _nothing() { return Nothing(); }
 
@@ -782,6 +783,24 @@ void Docker::_inspect(
   const Future<string> output = io::read(s.get().out().get());
 
   s.get().status()
+    .after(
+        DOCKER_INSPECT_TIMEOUT,
+        [=](const Future<Option<int>>& statusFuture) {
+      if(!statusFuture.isReady()) {
+        VLOG(1) << "Timeout waiting for '" << cmd << "'";
+
+        os::killtree(s.get().pid(), SIGKILL);
+
+        if (retryInterval.isSome()) {
+          VLOG(1) << "Retrying inspect after timeout. cmd: '"
+                  << cmd << "', interval: " << stringify(retryInterval.get());
+          Clock::timer(retryInterval.get(),
+                       [=]() { _inspect(cmd, promise, retryInterval); } );
+          return statusFuture;
+        }
+      }
+      return statusFuture;
+    })
     .onAny([=]() { __inspect(cmd, promise, retryInterval, output, s.get()); });
 }
 
